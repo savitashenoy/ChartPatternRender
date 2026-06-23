@@ -1,0 +1,573 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div id="statusBanner" class="card mb-4" style="display: none; border-left: 4px solid var(--accent-amber);">
+    <div class="card-body py-3">
+        <div class="d-flex align-items-center justify-content-between gap-3">
+            <div class="mono">
+                <span id="statusIcon" class="text-warning me-2"><i class="fa-solid fa-circle-notch fa-spin"></i></span>
+                <span id="statusText">Preparing scan...</span>
+            </div>
+            <button id="dismissStatusBtn" class="btn btn-sm btn-outline-secondary mono" type="button" style="display: none;">Dismiss</button>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-xl-3 col-lg-4">
+        <div class="card p-3 mb-4">
+            <h6 class="mono text-muted mb-3"><i class="fa-solid fa-table-list me-2"></i>DATA_SOURCE</h6>
+            <form id="scanForm">
+                <div class="mb-3">
+                    <label for="sheetSelect" class="form-label">Workbook Sheet</label>
+                    <select id="sheetSelect" class="form-select form-select-sm mono" required></select>
+                </div>
+
+                <div class="row g-2 mb-3">
+                    <div class="col-6">
+                        <label for="lookbackPeriod" class="form-label">Lookback</label>
+                        <select id="lookbackPeriod" class="form-select form-select-sm mono">
+                            <option value="6mo">6mo</option>
+                            <option value="1y" selected>1y</option>
+                            <option value="2y">2y</option>
+                            <option value="5y">5y</option>
+                        </select>
+                    </div>
+                    <div class="col-6">
+                        <label for="minPrice" class="form-label">Min Price</label>
+                        <input id="minPrice" class="form-control form-control-sm mono" type="number" min="0" step="0.01" value="{{ defaults.min_price }}">
+                    </div>
+                </div>
+
+                <div class="mb-3">
+                    <label for="minAvgVolume" class="form-label">Min Avg Volume 20D</label>
+                    <input id="minAvgVolume" class="form-control form-control-sm mono" type="number" min="0" step="10000" value="{{ defaults.min_avg_volume }}">
+                </div>
+
+                <div class="accordion mb-3" id="settingsAccordion">
+                    <div class="accordion-item bg-transparent border-secondary">
+                        <h2 class="accordion-header">
+                            <button class="accordion-button collapsed mono bg-transparent text-light px-0 py-2" type="button" data-bs-toggle="collapse" data-bs-target="#patternSettings">
+                                Pattern Thresholds
+                            </button>
+                        </h2>
+                        <div id="patternSettings" class="accordion-collapse collapse" data-bs-parent="#settingsAccordion">
+                            <div class="accordion-body px-0 pt-2">
+                                <div class="row g-2">
+                                    <div class="col-6">
+                                        <label for="rectDays" class="form-label">Rect Days</label>
+                                        <input id="rectDays" class="form-control form-control-sm mono" type="number" min="5" value="{{ defaults.rect_days }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="rectMaxRange" class="form-label">Rect Range</label>
+                                        <input id="rectMaxRange" class="form-control form-control-sm mono" type="number" min="0.01" max="0.5" step="0.01" value="{{ defaults.rect_max_range }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="rectTopPercentile" class="form-label">Rect Position</label>
+                                        <input id="rectTopPercentile" class="form-control form-control-sm mono" type="number" min="0.1" max="1" step="0.01" value="{{ defaults.rect_top_percentile }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="bfPoleReturn" class="form-label">Pole Return</label>
+                                        <input id="bfPoleReturn" class="form-control form-control-sm mono" type="number" min="0.01" max="2" step="0.01" value="{{ defaults.bf_pole_return }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="bfFlagDaysMin" class="form-label">Flag Min</label>
+                                        <input id="bfFlagDaysMin" class="form-control form-control-sm mono" type="number" min="1" value="{{ defaults.bf_flag_days_min }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="bfFlagDaysMax" class="form-label">Flag Max</label>
+                                        <input id="bfFlagDaysMax" class="form-control form-control-sm mono" type="number" min="2" value="{{ defaults.bf_flag_days_max }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="bfRetracementMin" class="form-label">Retrace Min</label>
+                                        <input id="bfRetracementMin" class="form-control form-control-sm mono" type="number" min="0.1" max="0.95" step="0.01" value="{{ defaults.bf_retracement_min }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="rbWeeks" class="form-label">Base Weeks</label>
+                                        <input id="rbWeeks" class="form-control form-control-sm mono" type="number" min="4" value="{{ defaults.rb_u_shape_min_weeks }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="rbDepth" class="form-label">Base Depth</label>
+                                        <input id="rbDepth" class="form-control form-control-sm mono" type="number" min="0.5" max="0.98" step="0.01" value="{{ defaults.rb_depth_threshold }}">
+                                    </div>
+                                    <div class="col-6">
+                                        <label for="rbProximity" class="form-label">Resistance Near</label>
+                                        <input id="rbProximity" class="form-control form-control-sm mono" type="number" min="0.8" max="1.1" step="0.01" value="{{ defaults.rb_proximity }}">
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <button type="submit" id="startBtn" class="btn btn-warning w-100 mono fw-bold">
+                    <i class="fa-solid fa-bolt me-1"></i> RUN SCAN
+                </button>
+            </form>
+        </div>
+
+        <div class="card p-3">
+            <h6 class="mono text-muted mb-3"><i class="fa-solid fa-sliders me-2"></i>PATTERN_FILTERS</h6>
+            <div class="d-flex flex-wrap gap-2" id="filterChips">
+                <button class="filter-chip active" data-pattern="RECTANGLE" type="button">RECTANGLE</button>
+                <button class="filter-chip active" data-pattern="BULL FLAG" type="button">BULL FLAG</button>
+                <button class="filter-chip active" data-pattern="ROUNDING BASE" type="button">ROUNDING BASE</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-9 col-lg-8">
+        <div class="row g-3 mb-4">
+            <div class="col-md-3 col-6">
+                <div class="metric mono">
+                    <span>SCANNED</span>
+                    <strong id="metricScanned">0</strong>
+                </div>
+            </div>
+            <div class="col-md-3 col-6">
+                <div class="metric mono">
+                    <span>MATCHES</span>
+                    <strong id="metricMatches">0</strong>
+                </div>
+            </div>
+            <div class="col-md-3 col-6">
+                <div class="metric mono">
+                    <span>VISIBLE</span>
+                    <strong id="metricVisible">0</strong>
+                </div>
+            </div>
+            <div class="col-md-3 col-6">
+                <div class="metric mono">
+                    <span>ELAPSED</span>
+                    <strong id="metricElapsed">0s</strong>
+                </div>
+            </div>
+        </div>
+
+        <div class="card p-3 mb-4">
+            <div class="d-flex flex-wrap gap-3 align-items-center justify-content-between">
+                <div class="input-group input-group-sm" style="max-width: 320px;">
+                    <span class="input-group-text bg-transparent border-end-0 text-muted"><i class="fa-solid fa-magnifying-glass"></i></span>
+                    <input type="text" id="searchInput" class="form-control border-start-0 mono" placeholder="search ticker...">
+                </div>
+                <div class="d-flex flex-wrap gap-2">
+                    <button id="copyTickersBtn" class="btn btn-sm btn-outline-info mono" type="button" disabled>
+                        <i class="fa-regular fa-copy me-1"></i> Copy Tickers
+                    </button>
+                    <button id="exportBtn" class="btn btn-sm btn-outline-success mono" type="button" disabled>
+                        <i class="fa-solid fa-download me-1"></i> Export Filtered
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="card p-0">
+            <div class="table-container">
+                <table class="table mb-0">
+                    <thead>
+                        <tr>
+                            <th data-sort="ticker" style="width: 10%;">Ticker <i class="fa-solid fa-sort sort-icon ms-1"></i></th>
+                            <th data-sort="pattern" style="width: 12%;">Pattern <i class="fa-solid fa-sort sort-icon ms-1"></i></th>
+                            <th data-sort="confidence" style="width: 10%;">Confidence <i class="fa-solid fa-sort-down sort-icon ms-1"></i></th>
+                            <th style="width: 18%; cursor: default;">Preview</th>
+                            <th data-sort="price" style="width: 9%;">Last <i class="fa-solid fa-sort sort-icon ms-1"></i></th>
+                            <th data-sort="change_pct" style="width: 9%;">Chg % <i class="fa-solid fa-sort sort-icon ms-1"></i></th>
+                            <th data-sort="avg_volume_20" style="width: 12%;">Avg Vol <i class="fa-solid fa-sort sort-icon ms-1"></i></th>
+                            <th style="cursor: default;">Reason</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tableBody">
+                        <tr>
+                            <td colspan="8" class="text-center p-5 text-muted mono">
+                                <i class="fa-solid fa-database fa-2x mb-3 opacity-50"></i>
+                                <p class="mb-0">Select a workbook sheet and run the scan.</p>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div id="failurePanel" class="card p-3 mt-4" style="display: none;">
+            <h6 class="mono text-muted mb-2"><i class="fa-solid fa-triangle-exclamation me-2"></i>FAILED_TICKERS</h6>
+            <div id="failureText" class="small text-muted"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+let tableData = [];
+let filteredData = [];
+let currentTaskId = null;
+let sortCol = "confidence";
+let sortAsc = false;
+let activePatterns = new Set(["RECTANGLE", "BULL FLAG", "ROUNDING BASE"]);
+
+const sheetSelect = document.getElementById("sheetSelect");
+const scanForm = document.getElementById("scanForm");
+const startBtn = document.getElementById("startBtn");
+const tableBody = document.getElementById("tableBody");
+const searchInput = document.getElementById("searchInput");
+const exportBtn = document.getElementById("exportBtn");
+const copyTickersBtn = document.getElementById("copyTickersBtn");
+const statusBanner = document.getElementById("statusBanner");
+const statusText = document.getElementById("statusText");
+const statusIcon = document.getElementById("statusIcon");
+const dismissStatusBtn = document.getElementById("dismissStatusBtn");
+
+function showStatus(message, mode = "busy") {
+    statusText.textContent = message;
+    statusBanner.style.display = "block";
+    dismissStatusBtn.style.display = mode === "error" ? "inline-block" : "none";
+    statusIcon.innerHTML = mode === "busy"
+        ? '<i class="fa-solid fa-circle-notch fa-spin"></i>'
+        : '<i class="fa-solid fa-circle-info"></i>';
+    statusIcon.className = mode === "error" ? "text-danger me-2" : "text-warning me-2";
+}
+
+function hideStatus() {
+    statusBanner.style.display = "none";
+}
+
+function valueOf(id) {
+    return document.getElementById(id).value;
+}
+
+function numericValue(id) {
+    const value = Number(valueOf(id));
+    return Number.isFinite(value) ? value : 0;
+}
+
+function collectConfig() {
+    return {
+        lookback_period: valueOf("lookbackPeriod"),
+        min_price: numericValue("minPrice"),
+        min_avg_volume: numericValue("minAvgVolume"),
+        rect_days: numericValue("rectDays"),
+        rect_max_range: numericValue("rectMaxRange"),
+        rect_top_percentile: numericValue("rectTopPercentile"),
+        bf_pole_return: numericValue("bfPoleReturn"),
+        bf_flag_days_min: numericValue("bfFlagDaysMin"),
+        bf_flag_days_max: numericValue("bfFlagDaysMax"),
+        bf_retracement_min: numericValue("bfRetracementMin"),
+        rb_u_shape_min_weeks: numericValue("rbWeeks"),
+        rb_depth_threshold: numericValue("rbDepth"),
+        rb_proximity: numericValue("rbProximity")
+    };
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function formatNumber(value) {
+    return Number(value || 0).toLocaleString("en-US");
+}
+
+function confidenceClass(value) {
+    if (value >= 80) return "text-success";
+    if (value >= 65) return "text-warning";
+    return "text-muted";
+}
+
+function badgeClass(pattern) {
+    if (pattern === "ROUNDING BASE") return "badge-rounding";
+    if (pattern === "RECTANGLE") return "badge-rect";
+    return "badge-flag";
+}
+
+function updateSortIcons() {
+    document.querySelectorAll("th[data-sort]").forEach((th) => {
+        const icon = th.querySelector(".sort-icon");
+        icon.className = "fa-solid fa-sort sort-icon ms-1";
+        if (th.dataset.sort === sortCol) {
+            icon.className = `fa-solid ${sortAsc ? "fa-sort-up" : "fa-sort-down"} sort-icon ms-1 text-warning`;
+        }
+    });
+}
+
+function renderTable() {
+    const query = searchInput.value.trim().toUpperCase();
+    filteredData = tableData.filter((row) => {
+        return row.ticker.includes(query) && activePatterns.has(row.pattern);
+    });
+
+    filteredData.sort((a, b) => {
+        const valA = a[sortCol];
+        const valB = b[sortCol];
+        if (typeof valA === "string") {
+            return sortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
+        }
+        return sortAsc ? Number(valA) - Number(valB) : Number(valB) - Number(valA);
+    });
+
+    document.getElementById("metricMatches").textContent = tableData.length;
+    document.getElementById("metricVisible").textContent = filteredData.length;
+    exportBtn.disabled = !currentTaskId || filteredData.length === 0;
+    copyTickersBtn.disabled = filteredData.length === 0;
+    updateSortIcons();
+
+    if (filteredData.length === 0) {
+        tableBody.innerHTML = `<tr><td colspan="8" class="text-center p-5 text-muted mono">No signals match the current filters.</td></tr>`;
+        return;
+    }
+
+    tableBody.innerHTML = filteredData.map((row, index) => {
+        const tvSymbol = encodeURIComponent(row.ticker.replace(".NS", ""));
+        const changeColor = row.change_pct >= 0 ? "text-success" : "text-danger";
+        const changeSign = row.change_pct >= 0 ? "+" : "";
+        return `
+            <tr class="mono">
+                <td>
+                    <a href="https://www.tradingview.com/chart/?symbol=${tvSymbol}&interval=60" target="_blank" rel="noopener noreferrer" class="ticker-link">
+                        ${escapeHtml(row.ticker)}
+                    </a>
+                </td>
+                <td><span class="term-badge ${badgeClass(row.pattern)}">${escapeHtml(row.pattern)}</span></td>
+                <td><span class="confidence-pill fw-bold ${confidenceClass(row.confidence)}">${row.confidence}%</span></td>
+                <td><canvas class="sparkline" data-chart-index="${index}"></canvas></td>
+                <td class="text-light fw-semibold">${Number(row.price).toFixed(2)}</td>
+                <td class="fw-bold ${changeColor}">${changeSign}${Number(row.change_pct).toFixed(2)}%</td>
+                <td>${formatNumber(row.avg_volume_20)}</td>
+                <td class="text-muted small" style="font-family: Manrope, sans-serif;">${escapeHtml(row.reason)}</td>
+            </tr>
+        `;
+    }).join("");
+
+    requestAnimationFrame(drawMiniCharts);
+}
+
+function dateIndex(labels, value) {
+    const exact = labels.indexOf(value);
+    if (exact >= 0) return exact;
+    return labels.findIndex((label) => label >= value);
+}
+
+function drawMiniCharts() {
+    document.querySelectorAll("canvas[data-chart-index]").forEach((canvas) => {
+        const chart = filteredData[Number(canvas.dataset.chartIndex)]?.chart;
+        if (!chart || !chart.close?.length) return;
+
+        const dpr = window.devicePixelRatio || 1;
+        const width = canvas.clientWidth || 190;
+        const height = canvas.clientHeight || 74;
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+
+        const prices = [...chart.close];
+        chart.overlays.forEach((overlay) => {
+            if (overlay.high) prices.push(overlay.high);
+            if (overlay.low) prices.push(overlay.low);
+            if (overlay.resistance) prices.push(overlay.resistance);
+            if (overlay.pole_start_price) prices.push(overlay.pole_start_price);
+            if (overlay.pole_peak_price) prices.push(overlay.pole_peak_price);
+            if (overlay.flag_low) prices.push(overlay.flag_low);
+        });
+
+        const min = Math.min(...prices);
+        const max = Math.max(...prices);
+        const pad = Math.max((max - min) * 0.12, max * 0.002, 1);
+        const low = min - pad;
+        const high = max + pad;
+
+        const xFor = (index) => chart.close.length <= 1 ? 0 : (index / (chart.close.length - 1)) * (width - 10) + 5;
+        const yFor = (price) => height - 8 - ((price - low) / (high - low)) * (height - 16);
+
+        ctx.fillStyle = "rgba(255, 255, 255, 0.03)";
+        ctx.fillRect(0, 0, width, height);
+
+        chart.overlays.forEach((overlay) => {
+            if (overlay.type === "rectangle") {
+                const start = Math.max(dateIndex(chart.labels, overlay.start), 0);
+                const end = Math.max(dateIndex(chart.labels, overlay.end), start);
+                const x = xFor(start);
+                const rectWidth = Math.max(xFor(end) - x, 6);
+                const yHigh = yFor(overlay.high);
+                const yLow = yFor(overlay.low);
+                ctx.fillStyle = "rgba(55, 201, 232, 0.16)";
+                ctx.fillRect(x, yHigh, rectWidth, Math.max(yLow - yHigh, 4));
+                ctx.strokeStyle = "rgba(55, 201, 232, 0.75)";
+                ctx.strokeRect(x, yHigh, rectWidth, Math.max(yLow - yHigh, 4));
+            }
+
+            if (overlay.type === "rounding_base") {
+                const y = yFor(overlay.resistance);
+                ctx.strokeStyle = "rgba(245, 185, 66, 0.85)";
+                ctx.setLineDash([4, 3]);
+                ctx.beginPath();
+                ctx.moveTo(5, y);
+                ctx.lineTo(width - 5, y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+
+            if (overlay.type === "bull_flag") {
+                const start = Math.max(dateIndex(chart.labels, overlay.pole_start), 0);
+                const peak = Math.max(dateIndex(chart.labels, overlay.pole_peak), start);
+                ctx.strokeStyle = "rgba(57, 217, 138, 0.9)";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(xFor(start), yFor(overlay.pole_start_price));
+                ctx.lineTo(xFor(peak), yFor(overlay.pole_peak_price));
+                ctx.stroke();
+                ctx.strokeStyle = "rgba(57, 217, 138, 0.55)";
+                ctx.setLineDash([4, 3]);
+                ctx.beginPath();
+                ctx.moveTo(xFor(peak), yFor(overlay.flag_low));
+                ctx.lineTo(width - 5, yFor(overlay.flag_low));
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        });
+
+        ctx.strokeStyle = "#d7dee9";
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        chart.close.forEach((price, index) => {
+            const x = xFor(index);
+            const y = yFor(price);
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    });
+}
+
+async function loadSheets() {
+    showStatus("Loading ScannerData.xlsx sheets...");
+    try {
+        const res = await fetch("/api/sheets");
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        sheetSelect.innerHTML = data.sheets.map((sheet) => {
+            return `<option value="${escapeHtml(sheet.name)}">${escapeHtml(sheet.name)} (${sheet.count})</option>`;
+        }).join("");
+        hideStatus();
+    } catch (err) {
+        showStatus(err.message, "error");
+    }
+}
+
+scanForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    tableData = [];
+    filteredData = [];
+    currentTaskId = null;
+    renderTable();
+    startBtn.disabled = true;
+    exportBtn.disabled = true;
+    copyTickersBtn.disabled = true;
+    document.getElementById("metricScanned").textContent = "0";
+    document.getElementById("metricElapsed").textContent = "0s";
+    document.getElementById("failurePanel").style.display = "none";
+
+    const sheet = sheetSelect.value;
+    showStatus(`Scanning ${sheet} from ScannerData.xlsx...`);
+
+    try {
+        const res = await fetch("/api/scan", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sheet, config: collectConfig() })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+
+        currentTaskId = data.task_id;
+        tableData = data.results || [];
+        document.getElementById("metricScanned").textContent = data.total;
+        document.getElementById("metricElapsed").textContent = `${data.elapsed_seconds}s`;
+
+        if (data.failure_count) {
+            const names = (data.failures || []).map((item) => escapeHtml(item.ticker)).join(", ");
+            document.getElementById("failureText").innerHTML = `${data.failure_count} ticker(s) failed. ${names}`;
+            document.getElementById("failurePanel").style.display = "block";
+        }
+
+        hideStatus();
+        renderTable();
+    } catch (err) {
+        showStatus(err.message, "error");
+    } finally {
+        startBtn.disabled = false;
+    }
+});
+
+document.querySelectorAll("th[data-sort]").forEach((th) => {
+    th.addEventListener("click", () => {
+        if (sortCol === th.dataset.sort) {
+            sortAsc = !sortAsc;
+        } else {
+            sortCol = th.dataset.sort;
+            sortAsc = th.dataset.sort !== "confidence";
+        }
+        renderTable();
+    });
+});
+
+document.querySelectorAll(".filter-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+        const pattern = chip.dataset.pattern;
+        if (activePatterns.has(pattern)) {
+            activePatterns.delete(pattern);
+            chip.classList.remove("active");
+        } else {
+            activePatterns.add(pattern);
+            chip.classList.add("active");
+        }
+        renderTable();
+    });
+});
+
+searchInput.addEventListener("input", renderTable);
+dismissStatusBtn.addEventListener("click", hideStatus);
+
+copyTickersBtn.addEventListener("click", async () => {
+    const tickers = [...new Set(filteredData.map((row) => row.ticker))].join("\n");
+    await navigator.clipboard.writeText(tickers);
+    showStatus(`${filteredData.length} visible signal ticker(s) copied.`, "info");
+    setTimeout(hideStatus, 1400);
+});
+
+exportBtn.addEventListener("click", async () => {
+    if (!currentTaskId || filteredData.length === 0) return;
+    const rows = filteredData.map(({ chart, ...row }) => row);
+    showStatus("Preparing filtered CSV...");
+    try {
+        const res = await fetch(`/api/export/${currentTaskId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rows })
+        });
+        if (!res.ok) {
+            const data = await res.json();
+            throw new Error(data.error || "Export failed.");
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `quant_scan_filtered_${currentTaskId.slice(0, 8)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        hideStatus();
+    } catch (err) {
+        showStatus(err.message, "error");
+    }
+});
+
+loadSheets();
+</script>
+{% endblock %}

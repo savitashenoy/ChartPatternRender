@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quant Pattern Scanner</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Manrope:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+
+    <style>
+        :root {
+            --bg-main: #0d1117;
+            --bg-card: #151b23;
+            --bg-panel: #101720;
+            --bg-table-header: #111821;
+            --border-color: #263244;
+            --text-main: #d7dee9;
+            --text-muted: #8090a7;
+            --accent-amber: #f5b942;
+            --accent-green: #39d98a;
+            --accent-cyan: #37c9e8;
+            --accent-red: #ff6b6b;
+        }
+
+        body {
+            background:
+                radial-gradient(circle at 18% 0%, rgba(55, 201, 232, 0.09), transparent 28%),
+                linear-gradient(180deg, #0d1117 0%, #0a0e13 100%);
+            color: var(--text-main);
+            font-family: "Manrope", sans-serif;
+            min-height: 100vh;
+        }
+
+        .mono { font-family: "IBM Plex Mono", monospace; }
+
+        .navbar {
+            background: rgba(21, 27, 35, 0.92) !important;
+            border-bottom: 1px solid var(--border-color);
+            backdrop-filter: blur(14px);
+        }
+
+        .card {
+            background-color: rgba(21, 27, 35, 0.96);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: 0 14px 44px rgba(0, 0, 0, 0.23);
+        }
+
+        .form-control,
+        .form-select {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+        }
+
+        .form-control:focus,
+        .form-select:focus {
+            background-color: var(--bg-panel);
+            border-color: var(--accent-amber);
+            color: white;
+            box-shadow: 0 0 0 0.2rem rgba(245, 185, 66, 0.12);
+        }
+
+        .form-label {
+            color: var(--text-muted);
+            font-family: "IBM Plex Mono", monospace;
+            font-size: 0.72rem;
+            text-transform: uppercase;
+        }
+
+        .btn-warning {
+            background-color: var(--accent-amber);
+            border-color: var(--accent-amber);
+            color: #17130a;
+        }
+
+        .metric {
+            border: 1px solid var(--border-color);
+            background: rgba(16, 23, 32, 0.72);
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .metric span {
+            color: var(--text-muted);
+            display: block;
+            font-size: 0.72rem;
+        }
+
+        .filter-chip {
+            background: transparent;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-family: "IBM Plex Mono", monospace;
+            padding: 5px 13px;
+            transition: all 0.2s ease;
+        }
+
+        .filter-chip:hover,
+        .filter-chip.active {
+            border-color: #a8b6ca;
+            color: #ffffff;
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .table-container { max-height: 700px; overflow: auto; }
+        .table { --bs-table-bg: transparent; color: var(--text-main); margin: 0; min-width: 1120px; }
+
+        thead th {
+            position: sticky;
+            top: 0;
+            z-index: 5;
+            background-color: var(--bg-table-header) !important;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-color);
+            cursor: pointer;
+            font-family: "IBM Plex Mono", monospace;
+            font-size: 0.72rem;
+            padding: 13px 14px;
+            text-transform: uppercase;
+            user-select: none;
+            white-space: nowrap;
+        }
+
+        tbody tr { border-bottom: 1px solid rgba(38, 50, 68, 0.65); }
+        tbody tr:hover { background-color: rgba(255, 255, 255, 0.025); }
+        tbody td { padding: 12px 14px; vertical-align: middle; }
+
+        .term-badge {
+            border-radius: 4px;
+            display: inline-block;
+            font-family: "IBM Plex Mono", monospace;
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.4px;
+            padding: 4px 8px;
+        }
+
+        .badge-rounding { background: rgba(245, 185, 66, 0.13); color: #ffd27a; border: 1px solid rgba(245, 185, 66, 0.35); }
+        .badge-rect { background: rgba(55, 201, 232, 0.13); color: #7de8fb; border: 1px solid rgba(55, 201, 232, 0.35); }
+        .badge-flag { background: rgba(57, 217, 138, 0.13); color: #89efbd; border: 1px solid rgba(57, 217, 138, 0.35); }
+
+        .ticker-link {
+            color: var(--accent-amber);
+            font-weight: 800;
+            text-decoration: none;
+        }
+
+        .ticker-link:hover { color: #ffd27a; text-decoration: underline; }
+        .sparkline { width: 190px; height: 74px; display: block; }
+        .confidence-pill { min-width: 64px; display: inline-block; }
+
+        ::-webkit-scrollbar { width: 7px; height: 7px; }
+        ::-webkit-scrollbar-track { background: var(--bg-main); }
+        ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg mb-4">
+        <div class="container-fluid px-4">
+            <a class="navbar-brand mono fw-bold text-light" href="/">
+                <i class="fa-solid fa-chart-line text-warning me-2"></i>QUANT_PATTERN_SCANNER
+            </a>
+        </div>
+    </nav>
+
+    <main class="container-fluid px-4 pb-5">
+        {% block content %}{% endblock %}
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
