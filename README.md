@@ -30,6 +30,19 @@ No application code changed — `app.py`, `api/index.py`, and the templates are 
    - `SCAN_TASK_TTL_SECONDS` (default `3600`)
 5. Click **Create Web Service**.
 
+## Fixing a "pandas build failed" error
+If your build log shows pandas trying to compile from source and failing
+with a Cython/C++ error, it means Render picked a Python version (e.g. 3.14)
+for which pandas has no pre-built wheel. This package pins the runtime via
+a `.python-version` file (`3.11.9`) at the repo root, which Render reads
+automatically regardless of how the service was created (Blueprint or
+manual Web Service). If you still see this error:
+1. Confirm `.python-version` exists at the **root** of the repo Render is
+   building (not inside a subfolder).
+2. In the Render dashboard, go to your service > **Environment** and check
+   there isn't a conflicting `PYTHON_VERSION` value overriding it.
+3. Trigger a fresh deploy with **Clear build cache & deploy**.
+
 ## Notes
 - `ScannerData.xlsx` is bundled in the repo and read at runtime from disk —
   no extra storage setup needed for this dataset.
