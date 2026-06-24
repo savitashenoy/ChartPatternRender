@@ -133,17 +133,36 @@ def parse_scan_config(payload):
     return config
 
 
-def download_chunk(tickers, period):
+def download_chunk(tickers, period, max_retries=3):
+    """Downloads one chunk of tickers. Yahoo Finance aggressively rate-limits
+    or blocks bursts of concurrent requests, especially from shared/datacenter
+    IPs like Render's — that's what causes 'Expecting value: line 1 column 1'
+    errors (Yahoo returning an empty body instead of JSON). To reduce that,
+    requests are sequential (threads=False) and retried with backoff."""
     joined = " ".join(tickers)
-    return yf.download(
-        joined,
-        period=period,
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=False,
-        progress=False,
-        threads=True,
-    )
+    last_exc = None
+
+    for attempt in range(max_retries):
+        try:
+            data = yf.download(
+                joined,
+                period=period,
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            if data is not None and not data.empty:
+                return data
+            last_exc = RuntimeError("Yahoo Finance returned no data for this batch.")
+        except Exception as exc:
+            last_exc = exc
+
+        if attempt < max_retries - 1:
+            time.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
+
+    raise last_exc if last_exc else RuntimeError("Unknown download failure.")
 
 
 def ticker_frame(raw_data, ticker, total_tickers):
@@ -328,16 +347,65 @@ def run_scan_task(task_id, tickers, config):
     was causing gateway timeouts / non-JSON error pages mid-scan)."""
     results = []
     failures = []
-    chunk_size = 80
+    chunk_size = 20  # smaller batches = gentler on Yahoo's rate limiter, finer progress updates
     total = len(tickers)
+    consecutive_chunk_failures = 0
+    max_consecutive_chunk_failures = 3  # strong signal Yahoo is blanket-blocking this server
+    max_scan_seconds = 480  # hard cap so a fully rate-limited scan can't "hang" forever
+
+    def finish_early(reason):
+        with scan_tasks_lock:
+            task = scan_tasks.get(task_id)
+            if task is None:
+                return
+            task["scanned"] = total
+            task["results"] = results
+            task["failures"] = failures
+            task["status"] = "done"
+            task["error"] = reason
+            task["elapsed_seconds"] = round(time.time() - task["started_at"], 2)
+            task["updated_at"] = time.time()
 
     try:
         for start in range(0, total, chunk_size):
             chunk = tickers[start : start + chunk_size]
+
+            with scan_tasks_lock:
+                task = scan_tasks.get(task_id)
+                if task is None:
+                    return  # task expired/removed; abandon quietly
+                elapsed_so_far = time.time() - task["started_at"]
+
+            if elapsed_so_far > max_scan_seconds:
+                remaining = tickers[start:]
+                failures.extend(
+                    {"ticker": t, "error": "Skipped: scan time limit reached."} for t in remaining
+                )
+                finish_early(
+                    "Stopped early after hitting the time limit, likely due to Yahoo Finance "
+                    "rate-limiting. Results below are from tickers that completed in time."
+                )
+                return
+
             try:
                 raw_data = download_chunk(chunk, config["lookback_period"])
+                consecutive_chunk_failures = 0
             except Exception as exc:
+                consecutive_chunk_failures += 1
                 failures.extend({"ticker": ticker, "error": str(exc)} for ticker in chunk)
+
+                if consecutive_chunk_failures >= max_consecutive_chunk_failures:
+                    remaining = tickers[start + len(chunk) :]
+                    failures.extend(
+                        {"ticker": t, "error": "Skipped: repeated Yahoo Finance failures."}
+                        for t in remaining
+                    )
+                    finish_early(
+                        "Stopped early: Yahoo Finance repeatedly rejected requests from this "
+                        "server (likely rate-limiting/blocking a shared cloud IP). Try again "
+                        "later, or scan a smaller sheet."
+                    )
+                    return
             else:
                 for ticker in chunk:
                     df = ticker_frame(raw_data, ticker, len(chunk))
@@ -369,6 +437,9 @@ def run_scan_task(task_id, tickers, config):
                 task["results"] = list(results)
                 task["failures"] = list(failures)
                 task["updated_at"] = time.time()
+
+            if start + chunk_size < total:
+                time.sleep(1)  # be polite between chunks to avoid tripping rate limits
 
         with scan_tasks_lock:
             task = scan_tasks.get(task_id)

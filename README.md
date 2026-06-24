@@ -30,6 +30,36 @@ No application code changed — `app.py`, `api/index.py`, and the templates are 
    - `SCAN_TASK_TTL_SECONDS` (default `3600`)
 5. Click **Create Web Service**.
 
+## Fixing a scan that gets stuck mid-way ("Expecting value: line 1 column 1")
+If Render's logs show repeated lines like:
+```
+Failed to get ticker 'XYZ.NS' reason: Expecting value: line 1 column 1 (char 0)
+```
+this is **not a bug in this app** — it means Yahoo Finance's unofficial API is
+rejecting/rate-limiting requests from Render's shared IP range and returning
+an empty body instead of JSON. This is a widely reported issue with `yfinance`
+on cloud platforms (Render, Heroku, AWS, PythonAnywhere, etc.) since Yahoo
+doesn't officially support or rate-limit this API predictably.
+
+**What this package now does about it:**
+- Downloads run sequentially (not multi-threaded bursts) and retry with
+  backoff, which is gentler on Yahoo's rate limiter.
+- Smaller batches (20 tickers instead of 80) with a 1s pause between batches.
+- If 3 batches in a row fail completely, the scan **stops early** instead of
+  grinding through the rest of the sheet for many minutes — it finishes with
+  whatever results it gathered plus a clear message explaining why it
+  stopped, instead of looking "stuck."
+- A hard 8-minute cap on total scan time as a backstop.
+
+**If you keep hitting this:** it usually means Yahoo has temporarily flagged
+Render's IP range. Things that help:
+- Wait a while and try again (the block is often temporary).
+- Scan smaller sheets/watchlists instead of large ones.
+- For reliable production use, consider switching the data source to an
+  official paid market-data API (e.g. Alpha Vantage, Twelve Data, Finnhub,
+  or NSE's own data feed) — those have predictable rate limits and won't
+  silently block cloud-host IPs the way Yahoo's unofficial API does.
+
 ## Fixing "Unexpected token '<', is not valid JSON" mid-scan
 This happened because the original `/api/scan` endpoint ran the entire scan
 synchronously inside a single HTTP request. For large sheets this could take

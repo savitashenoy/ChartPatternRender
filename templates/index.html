@@ -523,7 +523,7 @@ async function pollScanStatus(taskId) {
     try {
         const res = await fetch(`/api/scan/status/${taskId}`);
         const data = await parseJsonResponse(res);
-        if (data.error) throw new Error(data.error);
+        if (data.error && !data.status) throw new Error(data.error); // hard error, e.g. task not found
 
         tableData = data.results || [];
         document.getElementById("metricScanned").textContent = `${data.scanned} / ${data.total}`;
@@ -540,13 +540,20 @@ async function pollScanStatus(taskId) {
             throw new Error(data.error || "Scan failed unexpectedly.");
         }
 
+        // status === "done" — data.error here (if present) is a soft warning,
+        // e.g. the scan stopped early due to Yahoo Finance rate-limiting.
+        // Partial results are still valid and shown below.
         if (data.failure_count) {
             const names = (data.failures || []).map((item) => escapeHtml(item.ticker)).join(", ");
             document.getElementById("failureText").innerHTML = `${data.failure_count} ticker(s) failed. ${names}`;
             document.getElementById("failurePanel").style.display = "block";
         }
 
-        hideStatus();
+        if (data.error) {
+            showStatus(data.error, "error");
+        } else {
+            hideStatus();
+        }
         startBtn.disabled = false;
     } catch (err) {
         showStatus(err.message, "error");
