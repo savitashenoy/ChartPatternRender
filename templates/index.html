@@ -198,7 +198,7 @@
 <script>
 let tableData = [];
 let filteredData = [];
-let currentTaskId = null;
+let scanRunning = false;
 let sortCol = "confidence";
 let sortAsc = false;
 let activePatterns = new Set(["RECTANGLE", "BULL FLAG", "ROUNDING BASE"]);
@@ -325,7 +325,7 @@ function renderTable() {
 
     document.getElementById("metricMatches").textContent = tableData.length;
     document.getElementById("metricVisible").textContent = filteredData.length;
-    exportBtn.disabled = !currentTaskId || filteredData.length === 0;
+    exportBtn.disabled = filteredData.length === 0;
     copyTickersBtn.disabled = filteredData.length === 0;
     updateSortIcons();
 
@@ -475,21 +475,10 @@ async function loadSheets() {
     }
 }
 
-let pollTimer = null;
-
-function stopPolling() {
-    if (pollTimer) {
-        clearTimeout(pollTimer);
-        pollTimer = null;
-    }
-}
-
 scanForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    stopPolling();
     tableData = [];
     filteredData = [];
-    currentTaskId = null;
     renderTable();
     startBtn.disabled = true;
     exportBtn.disabled = true;
@@ -499,66 +488,71 @@ scanForm.addEventListener("submit", async (event) => {
     document.getElementById("failurePanel").style.display = "none";
 
     const sheet = sheetSelect.value;
-    showStatus(`Scanning ${sheet} from ScannerData.xlsx...`);
+    const config = collectConfig();
+    showStatus(`Loading tickers for ${sheet}...`);
 
     try {
-        const res = await fetch("/api/scan", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sheet, config: collectConfig() })
-        });
+        const res = await fetch(`/api/tickers?sheet=${encodeURIComponent(sheet)}`);
         const data = await parseJsonResponse(res);
         if (data.error) throw new Error(data.error);
 
-        currentTaskId = data.task_id;
-        document.getElementById("metricScanned").textContent = `0 / ${data.total}`;
-        pollScanStatus(data.task_id);
+        await runSequentialScan(sheet, data.tickers, config);
     } catch (err) {
         showStatus(err.message, "error");
         startBtn.disabled = false;
     }
 });
 
-async function pollScanStatus(taskId) {
-    try {
-        const res = await fetch(`/api/scan/status/${taskId}`);
-        const data = await parseJsonResponse(res);
-        if (data.error && !data.status) throw new Error(data.error); // hard error, e.g. task not found
+async function runSequentialScan(sheet, tickers, config) {
+    // Scans one ticker at a time, sequentially — never in parallel. This
+    // mirrors a known-working deployment pattern: a single in-flight
+    // request to /api/scan_one at any moment is naturally paced by the
+    // browser's own request/response round-trip, which is far gentler on
+    // Yahoo Finance's rate limiter than firing off a multi-ticker batch
+    // download. Progress renders incrementally as each ticker completes.
+    scanRunning = true;
+    const total = tickers.length;
+    const failures = [];
+    const startedAt = Date.now();
+    document.getElementById("metricScanned").textContent = `0 / ${total}`;
 
-        tableData = data.results || [];
-        document.getElementById("metricScanned").textContent = `${data.scanned} / ${data.total}`;
-        document.getElementById("metricElapsed").textContent = `${data.elapsed_seconds}s`;
-        renderTable();
+    for (let i = 0; i < tickers.length; i++) {
+        const ticker = tickers[i];
+        showStatus(`Scanning ${ticker} (${i + 1}/${total})...`);
 
-        if (data.status === "running") {
-            showStatus(`Scanning... ${data.scanned}/${data.total} tickers checked`);
-            pollTimer = setTimeout(() => pollScanStatus(taskId), 1500);
-            return;
+        try {
+            const res = await fetch("/api/scan_one", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ticker, sheet, config })
+            });
+            const data = await parseJsonResponse(res);
+
+            if (data.warning) {
+                failures.push({ ticker: data.ticker || ticker, error: data.warning });
+            }
+            if (Array.isArray(data.rows) && data.rows.length) {
+                tableData = tableData.concat(data.rows);
+                renderTable();
+            }
+        } catch (err) {
+            failures.push({ ticker, error: err.message });
         }
 
-        if (data.status === "error") {
-            throw new Error(data.error || "Scan failed unexpectedly.");
-        }
-
-        // status === "done" — data.error here (if present) is a soft warning,
-        // e.g. the scan stopped early due to Yahoo Finance rate-limiting.
-        // Partial results are still valid and shown below.
-        if (data.failure_count) {
-            const names = (data.failures || []).map((item) => escapeHtml(item.ticker)).join(", ");
-            document.getElementById("failureText").innerHTML = `${data.failure_count} ticker(s) failed. ${names}`;
-            document.getElementById("failurePanel").style.display = "block";
-        }
-
-        if (data.error) {
-            showStatus(data.error, "error");
-        } else {
-            hideStatus();
-        }
-        startBtn.disabled = false;
-    } catch (err) {
-        showStatus(err.message, "error");
-        startBtn.disabled = false;
+        const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+        document.getElementById("metricScanned").textContent = `${i + 1} / ${total}`;
+        document.getElementById("metricElapsed").textContent = `${elapsedSeconds}s`;
     }
+
+    if (failures.length) {
+        const names = failures.slice(0, 25).map((item) => escapeHtml(item.ticker)).join(", ");
+        document.getElementById("failureText").innerHTML = `${failures.length} ticker(s) failed or had no data. ${names}`;
+        document.getElementById("failurePanel").style.display = "block";
+    }
+
+    scanRunning = false;
+    hideStatus();
+    startBtn.disabled = false;
 }
 
 document.querySelectorAll("th[data-sort]").forEach((th) => {
@@ -598,14 +592,15 @@ copyTickersBtn.addEventListener("click", async () => {
 });
 
 exportBtn.addEventListener("click", async () => {
-    if (!currentTaskId || filteredData.length === 0) return;
+    if (filteredData.length === 0) return;
     const rows = filteredData.map(({ chart, ...row }) => row);
+    const sheet = sheetSelect.value;
     showStatus("Preparing filtered CSV...");
     try {
-        const res = await fetch(`/api/export/${currentTaskId}`, {
+        const res = await fetch("/api/export", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ rows })
+            body: JSON.stringify({ rows, sheet })
         });
         if (!res.ok) {
             const data = await parseJsonResponse(res);
@@ -615,7 +610,7 @@ exportBtn.addEventListener("click", async () => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `quant_scan_filtered_${currentTaskId.slice(0, 8)}.csv`;
+        a.download = `quant_scan_${sheet.replace(/[^a-z0-9]+/gi, "_")}_filtered.csv`;
         document.body.appendChild(a);
         a.click();
         a.remove();

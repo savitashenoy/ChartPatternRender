@@ -1,10 +1,7 @@
 import csv
 import io
-import json
 import os
-import threading
 import time
-import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -17,10 +14,6 @@ DATA_FILE = BASE_DIR / "ScannerData.xlsx"
 
 app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "quant_scanner_dev_secret")
-
-scan_tasks = {}
-scan_tasks_lock = threading.Lock()
-TASK_TTL_SECONDS = int(os.environ.get("SCAN_TASK_TTL_SECONDS", "3600"))
 
 DEFAULT_SCAN_CONFIG = {
     "lookback_period": "1y",
@@ -41,18 +34,6 @@ DEFAULT_SCAN_CONFIG = {
 
 def clamp(value, minimum, maximum):
     return max(minimum, min(maximum, value))
-
-
-def cleanup_tasks():
-    cutoff = time.time() - TASK_TTL_SECONDS
-    with scan_tasks_lock:
-        expired_ids = [
-            task_id
-            for task_id, task in scan_tasks.items()
-            if task.get("updated_at", task.get("created_at", 0)) < cutoff
-        ]
-        for task_id in expired_ids:
-            scan_tasks.pop(task_id, None)
 
 
 def workbook():
@@ -133,54 +114,31 @@ def parse_scan_config(payload):
     return config
 
 
-def download_chunk(tickers, period, max_retries=3):
-    """Downloads one chunk of tickers. Yahoo Finance aggressively rate-limits
-    or blocks bursts of concurrent requests, especially from shared/datacenter
-    IPs like Render's — that's what causes 'Expecting value: line 1 column 1'
-    errors (Yahoo returning an empty body instead of JSON). To reduce that,
-    requests are sequential (threads=False) and retried with backoff."""
-    joined = " ".join(tickers)
-    last_exc = None
+def fetch_history(ticker, period):
+    """Fetches one ticker's history at a time via yf.Ticker().history().
 
-    for attempt in range(max_retries):
+    This mirrors the pattern used by a known-working reference deployment:
+    single-ticker requests are far less likely to be rate-limited/blocked by
+    Yahoo Finance than yf.download() calls that join many tickers into one
+    batch request — which is what previously caused 'Expecting value: line 1
+    column 1' errors on Render. A single quick retry covers transient blips;
+    consistent failures usually mean Yahoo is rejecting the request outright,
+    so retrying further wouldn't help — analyze_ticker treats no data as
+    "no match" rather than a hard error, same as the working reference app.
+    """
+    for attempt in range(2):
         try:
-            data = yf.download(
-                joined,
-                period=period,
-                interval="1d",
-                group_by="ticker",
-                auto_adjust=False,
-                progress=False,
-                threads=False,
-            )
-            if data is not None and not data.empty:
-                return data
-            last_exc = RuntimeError("Yahoo Finance returned no data for this batch.")
-        except Exception as exc:
-            last_exc = exc
+            df = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=False)
+        except Exception:
+            df = None
 
-        if attempt < max_retries - 1:
-            time.sleep(2 ** attempt)  # 1s, 2s, 4s backoff
+        if df is not None and not df.empty:
+            return df
 
-    raise last_exc if last_exc else RuntimeError("Unknown download failure.")
+        if attempt == 0:
+            time.sleep(0.3)
 
-
-def ticker_frame(raw_data, ticker, total_tickers):
-    if raw_data.empty:
-        return pd.DataFrame()
-
-    if total_tickers == 1 and not isinstance(raw_data.columns, pd.MultiIndex):
-        return raw_data.copy()
-
-    if isinstance(raw_data.columns, pd.MultiIndex):
-        level_zero = raw_data.columns.get_level_values(0)
-        level_one = raw_data.columns.get_level_values(1)
-        if ticker in level_zero:
-            return raw_data[ticker].copy()
-        if ticker in level_one:
-            return raw_data.xs(ticker, level=1, axis=1).copy()
-
-    return pd.DataFrame()
+    return None
 
 
 def chart_payload(df, overlays):
@@ -340,125 +298,9 @@ def analyze_ticker(ticker, df, config):
         return {"ticker": ticker, "error": str(exc)}
 
 
-def run_scan_task(task_id, tickers, config):
-    """Runs in a background thread. Scans tickers in chunks and writes
-    incremental progress into scan_tasks so the frontend can poll it,
-    instead of holding one long-lived HTTP request open (which is what
-    was causing gateway timeouts / non-JSON error pages mid-scan)."""
-    results = []
-    failures = []
-    chunk_size = 20  # smaller batches = gentler on Yahoo's rate limiter, finer progress updates
-    total = len(tickers)
-    consecutive_chunk_failures = 0
-    max_consecutive_chunk_failures = 3  # strong signal Yahoo is blanket-blocking this server
-    max_scan_seconds = 480  # hard cap so a fully rate-limited scan can't "hang" forever
-
-    def finish_early(reason):
-        with scan_tasks_lock:
-            task = scan_tasks.get(task_id)
-            if task is None:
-                return
-            task["scanned"] = total
-            task["results"] = results
-            task["failures"] = failures
-            task["status"] = "done"
-            task["error"] = reason
-            task["elapsed_seconds"] = round(time.time() - task["started_at"], 2)
-            task["updated_at"] = time.time()
-
-    try:
-        for start in range(0, total, chunk_size):
-            chunk = tickers[start : start + chunk_size]
-
-            with scan_tasks_lock:
-                task = scan_tasks.get(task_id)
-                if task is None:
-                    return  # task expired/removed; abandon quietly
-                elapsed_so_far = time.time() - task["started_at"]
-
-            if elapsed_so_far > max_scan_seconds:
-                remaining = tickers[start:]
-                failures.extend(
-                    {"ticker": t, "error": "Skipped: scan time limit reached."} for t in remaining
-                )
-                finish_early(
-                    "Stopped early after hitting the time limit, likely due to Yahoo Finance "
-                    "rate-limiting. Results below are from tickers that completed in time."
-                )
-                return
-
-            try:
-                raw_data = download_chunk(chunk, config["lookback_period"])
-                consecutive_chunk_failures = 0
-            except Exception as exc:
-                consecutive_chunk_failures += 1
-                failures.extend({"ticker": ticker, "error": str(exc)} for ticker in chunk)
-
-                if consecutive_chunk_failures >= max_consecutive_chunk_failures:
-                    remaining = tickers[start + len(chunk) :]
-                    failures.extend(
-                        {"ticker": t, "error": "Skipped: repeated Yahoo Finance failures."}
-                        for t in remaining
-                    )
-                    finish_early(
-                        "Stopped early: Yahoo Finance repeatedly rejected requests from this "
-                        "server (likely rate-limiting/blocking a shared cloud IP). Try again "
-                        "later, or scan a smaller sheet."
-                    )
-                    return
-            else:
-                for ticker in chunk:
-                    df = ticker_frame(raw_data, ticker, len(chunk))
-                    analyzed = analyze_ticker(ticker, df, config)
-                    if not analyzed:
-                        continue
-                    if analyzed.get("error"):
-                        failures.append(analyzed)
-                        continue
-                    for match in analyzed["matches"]:
-                        results.append(
-                            {
-                                "ticker": analyzed["ticker"],
-                                "price": analyzed["price"],
-                                "change_pct": analyzed["change_pct"],
-                                "avg_volume_20": analyzed["avg_volume_20"],
-                                "pattern": match["pattern"],
-                                "confidence": match["confidence"],
-                                "reason": match["reason"],
-                                "chart": match["chart"],
-                            }
-                        )
-
-            with scan_tasks_lock:
-                task = scan_tasks.get(task_id)
-                if task is None:
-                    return  # task expired/removed; abandon quietly
-                task["scanned"] = min(start + len(chunk), total)
-                task["results"] = list(results)
-                task["failures"] = list(failures)
-                task["updated_at"] = time.time()
-
-            if start + chunk_size < total:
-                time.sleep(1)  # be polite between chunks to avoid tripping rate limits
-
-        with scan_tasks_lock:
-            task = scan_tasks.get(task_id)
-            if task is None:
-                return
-            task["status"] = "done"
-            task["scanned"] = total
-            task["results"] = results
-            task["failures"] = failures
-            task["elapsed_seconds"] = round(time.time() - task["started_at"], 2)
-            task["updated_at"] = time.time()
-
-    except Exception as exc:
-        with scan_tasks_lock:
-            task = scan_tasks.get(task_id)
-            if task is not None:
-                task["status"] = "error"
-                task["error"] = str(exc)
-                task["updated_at"] = time.time()
+@app.route("/health")
+def health():
+    return jsonify({"ok": True})
 
 
 @app.route("/")
@@ -468,7 +310,6 @@ def index():
 
 @app.route("/api/sheets")
 def api_sheets():
-    cleanup_tasks()
     try:
         sheets = []
         for name in sheet_names():
@@ -478,84 +319,71 @@ def api_sheets():
         return jsonify({"error": str(exc)}), 500
 
 
-@app.route("/api/scan", methods=["POST"])
-def api_scan():
-    cleanup_tasks()
-    payload = request.get_json(silent=True) or {}
-    sheet_name = payload.get("sheet")
-    config = parse_scan_config(payload)
-
+@app.route("/api/tickers")
+def api_tickers():
+    sheet_name = request.args.get("sheet")
     try:
         tickers = load_tickers(sheet_name)
         if not tickers:
             return jsonify({"error": "Selected sheet does not contain any tickers."}), 400
+        return jsonify({"sheet": sheet_name, "tickers": tickers, "total": len(tickers)})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
-    task_id = str(uuid.uuid4())
-    now = time.time()
-    with scan_tasks_lock:
-        scan_tasks[task_id] = {
-            "status": "running",
-            "created_at": now,
-            "updated_at": now,
-            "started_at": now,
-            "sheet": sheet_name,
-            "config": config,
-            "total": len(tickers),
-            "scanned": 0,
-            "results": [],
-            "failures": [],
-            "error": None,
-            "elapsed_seconds": 0,
-        }
 
-    thread = threading.Thread(target=run_scan_task, args=(task_id, tickers, config), daemon=True)
-    thread.start()
-
-    # Returns immediately with a task_id. The actual scan runs in the
-    # background thread above; the frontend polls /api/scan/status/<task_id>
-    # for progress instead of waiting on one long HTTP request.
-    return jsonify({"task_id": task_id, "sheet": sheet_name, "total": len(tickers)}), 202
-
-
-@app.route("/api/scan/status/<task_id>")
-def api_scan_status(task_id):
-    cleanup_tasks()
-    with scan_tasks_lock:
-        task = scan_tasks.get(task_id)
-        if not task:
-            return jsonify({"error": "Scan result expired or was not found."}), 404
-
-        elapsed = task.get("elapsed_seconds") or round(time.time() - task["started_at"], 2)
-        failures = task.get("failures", [])
-        return jsonify(
-            {
-                "task_id": task_id,
-                "status": task["status"],
-                "total": task["total"],
-                "scanned": task["scanned"],
-                "results": task["results"],
-                "failures": failures[:25],
-                "failure_count": len(failures),
-                "error": task.get("error"),
-                "elapsed_seconds": elapsed,
-            }
-        )
-
-
-@app.route("/api/export/<task_id>", methods=["POST"])
-def api_export(task_id):
-    cleanup_tasks()
-    with scan_tasks_lock:
-        task = scan_tasks.get(task_id)
-        if not task:
-            return jsonify({"error": "Scan result expired or was not found."}), 404
-        default_rows = task.get("results", [])
-        task["updated_at"] = time.time()
-
+@app.route("/api/scan_one", methods=["POST"])
+def api_scan_one():
+    """Scans exactly one ticker per request. The frontend calls this in a
+    sequential loop (one ticker at a time, never in parallel) instead of
+    one backend call doing a multi-ticker yf.download() batch. This mirrors
+    a known-working deployment pattern: single-ticker yf.Ticker().history()
+    requests, paced by the natural request/response cycle, are far less
+    likely to trigger Yahoo Finance's rate-limiting/blocking than bursty
+    multi-ticker batch downloads — which is what caused scans to get stuck
+    or return empty responses on Render before."""
     payload = request.get_json(silent=True) or {}
-    rows = payload.get("rows") or default_rows
+    ticker = str(payload.get("ticker", "")).strip().upper()
+    if not ticker:
+        return jsonify({"error": "Ticker is required."}), 400
+
+    config = parse_scan_config(payload)
+
+    try:
+        df = fetch_history(ticker, config["lookback_period"])
+        if df is None:
+            return jsonify({"ticker": ticker, "rows": []})
+
+        analyzed = analyze_ticker(ticker, df, config)
+        if not analyzed:
+            return jsonify({"ticker": ticker, "rows": []})
+        if analyzed.get("error"):
+            return jsonify({"ticker": ticker, "rows": [], "warning": analyzed["error"]})
+
+        rows = [
+            {
+                "ticker": analyzed["ticker"],
+                "price": analyzed["price"],
+                "change_pct": analyzed["change_pct"],
+                "avg_volume_20": analyzed["avg_volume_20"],
+                "pattern": match["pattern"],
+                "confidence": match["confidence"],
+                "reason": match["reason"],
+                "chart": match["chart"],
+            }
+            for match in analyzed["matches"]
+        ]
+        return jsonify({"ticker": ticker, "rows": rows})
+    except Exception as exc:
+        # Non-fatal: the frontend logs this as a warning and moves on to the
+        # next ticker, instead of aborting the whole scan.
+        return jsonify({"ticker": ticker, "rows": [], "warning": str(exc)})
+
+
+@app.route("/api/export", methods=["POST"])
+def api_export():
+    payload = request.get_json(silent=True) or {}
+    rows = payload.get("rows") or []
+    sheet_name = payload.get("sheet") or "scan"
 
     si = io.StringIO()
     writer = csv.writer(si)
@@ -573,8 +401,9 @@ def api_export(task_id):
             ]
         )
 
-    task["updated_at"] = time.time()
-    filename = f"quant_scan_{task_id[:8]}_filtered.csv"
+    safe_sheet = "".join(c if c.isalnum() else "_" for c in str(sheet_name))[:40] or "scan"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    filename = f"quant_scan_{safe_sheet}_{timestamp}.csv"
     return Response(
         si.getvalue(),
         mimetype="text/csv",
