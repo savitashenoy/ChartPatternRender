@@ -30,6 +30,29 @@ No application code changed — `app.py`, `api/index.py`, and the templates are 
    - `SCAN_TASK_TTL_SECONDS` (default `3600`)
 5. Click **Create Web Service**.
 
+## Fixing "Unexpected token '<', is not valid JSON" mid-scan
+This happened because the original `/api/scan` endpoint ran the entire scan
+synchronously inside a single HTTP request. For large sheets this could take
+longer than the gunicorn worker timeout (or hit transient network hiccups
+with yfinance), causing the connection to be killed mid-response. The browser
+then received an HTML error page instead of JSON, and `res.json()` threw the
+confusing "Unexpected token '<'" error.
+
+**Fix:** the scan now runs in a background thread. `POST /api/scan` returns
+immediately with a `task_id`, and the frontend polls
+`GET /api/scan/status/<task_id>` every ~1.5s for progress until the scan
+finishes. No single request stays open for more than a second or two.
+
+Because progress is tracked in an in-memory dict (`scan_tasks`) inside one
+Python process, the service **must run with a single worker** (multiple
+threads are fine — they share memory; multiple worker *processes* do not).
+This is already set in `render.yaml`:
+```
+gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120
+```
+If you ever need to scale beyond one instance, move `scan_tasks` to Redis or
+a database so all instances can see the same task state.
+
 ## Fixing a "pandas build failed" error
 If your build log shows pandas trying to compile from source and failing
 with a Cython/C++ error, it means Render picked a Python version (e.g. 3.14)

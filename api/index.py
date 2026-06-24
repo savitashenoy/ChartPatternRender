@@ -2,6 +2,7 @@ import csv
 import io
 import json
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -18,6 +19,7 @@ app = Flask(__name__, template_folder=str(BASE_DIR / "templates"))
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "quant_scanner_dev_secret")
 
 scan_tasks = {}
+scan_tasks_lock = threading.Lock()
 TASK_TTL_SECONDS = int(os.environ.get("SCAN_TASK_TTL_SECONDS", "3600"))
 
 DEFAULT_SCAN_CONFIG = {
@@ -43,13 +45,14 @@ def clamp(value, minimum, maximum):
 
 def cleanup_tasks():
     cutoff = time.time() - TASK_TTL_SECONDS
-    expired_ids = [
-        task_id
-        for task_id, task in scan_tasks.items()
-        if task.get("updated_at", task.get("created_at", 0)) < cutoff
-    ]
-    for task_id in expired_ids:
-        scan_tasks.pop(task_id, None)
+    with scan_tasks_lock:
+        expired_ids = [
+            task_id
+            for task_id, task in scan_tasks.items()
+            if task.get("updated_at", task.get("created_at", 0)) < cutoff
+        ]
+        for task_id in expired_ids:
+            scan_tasks.pop(task_id, None)
 
 
 def workbook():
@@ -318,42 +321,73 @@ def analyze_ticker(ticker, df, config):
         return {"ticker": ticker, "error": str(exc)}
 
 
-def scan_tickers(tickers, config):
+def run_scan_task(task_id, tickers, config):
+    """Runs in a background thread. Scans tickers in chunks and writes
+    incremental progress into scan_tasks so the frontend can poll it,
+    instead of holding one long-lived HTTP request open (which is what
+    was causing gateway timeouts / non-JSON error pages mid-scan)."""
     results = []
     failures = []
     chunk_size = 80
+    total = len(tickers)
 
-    for start in range(0, len(tickers), chunk_size):
-        chunk = tickers[start : start + chunk_size]
-        try:
-            raw_data = download_chunk(chunk, config["lookback_period"])
-        except Exception as exc:
-            failures.extend({"ticker": ticker, "error": str(exc)} for ticker in chunk)
-            continue
+    try:
+        for start in range(0, total, chunk_size):
+            chunk = tickers[start : start + chunk_size]
+            try:
+                raw_data = download_chunk(chunk, config["lookback_period"])
+            except Exception as exc:
+                failures.extend({"ticker": ticker, "error": str(exc)} for ticker in chunk)
+            else:
+                for ticker in chunk:
+                    df = ticker_frame(raw_data, ticker, len(chunk))
+                    analyzed = analyze_ticker(ticker, df, config)
+                    if not analyzed:
+                        continue
+                    if analyzed.get("error"):
+                        failures.append(analyzed)
+                        continue
+                    for match in analyzed["matches"]:
+                        results.append(
+                            {
+                                "ticker": analyzed["ticker"],
+                                "price": analyzed["price"],
+                                "change_pct": analyzed["change_pct"],
+                                "avg_volume_20": analyzed["avg_volume_20"],
+                                "pattern": match["pattern"],
+                                "confidence": match["confidence"],
+                                "reason": match["reason"],
+                                "chart": match["chart"],
+                            }
+                        )
 
-        for ticker in chunk:
-            df = ticker_frame(raw_data, ticker, len(chunk))
-            analyzed = analyze_ticker(ticker, df, config)
-            if not analyzed:
-                continue
-            if analyzed.get("error"):
-                failures.append(analyzed)
-                continue
-            for match in analyzed["matches"]:
-                results.append(
-                    {
-                        "ticker": analyzed["ticker"],
-                        "price": analyzed["price"],
-                        "change_pct": analyzed["change_pct"],
-                        "avg_volume_20": analyzed["avg_volume_20"],
-                        "pattern": match["pattern"],
-                        "confidence": match["confidence"],
-                        "reason": match["reason"],
-                        "chart": match["chart"],
-                    }
-                )
+            with scan_tasks_lock:
+                task = scan_tasks.get(task_id)
+                if task is None:
+                    return  # task expired/removed; abandon quietly
+                task["scanned"] = min(start + len(chunk), total)
+                task["results"] = list(results)
+                task["failures"] = list(failures)
+                task["updated_at"] = time.time()
 
-    return results, failures
+        with scan_tasks_lock:
+            task = scan_tasks.get(task_id)
+            if task is None:
+                return
+            task["status"] = "done"
+            task["scanned"] = total
+            task["results"] = results
+            task["failures"] = failures
+            task["elapsed_seconds"] = round(time.time() - task["started_at"], 2)
+            task["updated_at"] = time.time()
+
+    except Exception as exc:
+        with scan_tasks_lock:
+            task = scan_tasks.get(task_id)
+            if task is not None:
+                task["status"] = "error"
+                task["error"] = str(exc)
+                task["updated_at"] = time.time()
 
 
 @app.route("/")
@@ -384,45 +418,73 @@ def api_scan():
         tickers = load_tickers(sheet_name)
         if not tickers:
             return jsonify({"error": "Selected sheet does not contain any tickers."}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
-        started = time.time()
-        results, failures = scan_tickers(tickers, config)
-        task_id = str(uuid.uuid4())
-        now = time.time()
+    task_id = str(uuid.uuid4())
+    now = time.time()
+    with scan_tasks_lock:
         scan_tasks[task_id] = {
+            "status": "running",
             "created_at": now,
             "updated_at": now,
+            "started_at": now,
             "sheet": sheet_name,
             "config": config,
             "total": len(tickers),
-            "results": results,
-            "failures": failures,
+            "scanned": 0,
+            "results": [],
+            "failures": [],
+            "error": None,
+            "elapsed_seconds": 0,
         }
 
+    thread = threading.Thread(target=run_scan_task, args=(task_id, tickers, config), daemon=True)
+    thread.start()
+
+    # Returns immediately with a task_id. The actual scan runs in the
+    # background thread above; the frontend polls /api/scan/status/<task_id>
+    # for progress instead of waiting on one long HTTP request.
+    return jsonify({"task_id": task_id, "sheet": sheet_name, "total": len(tickers)}), 202
+
+
+@app.route("/api/scan/status/<task_id>")
+def api_scan_status(task_id):
+    cleanup_tasks()
+    with scan_tasks_lock:
+        task = scan_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "Scan result expired or was not found."}), 404
+
+        elapsed = task.get("elapsed_seconds") or round(time.time() - task["started_at"], 2)
+        failures = task.get("failures", [])
         return jsonify(
             {
                 "task_id": task_id,
-                "sheet": sheet_name,
-                "total": len(tickers),
-                "results": results,
+                "status": task["status"],
+                "total": task["total"],
+                "scanned": task["scanned"],
+                "results": task["results"],
                 "failures": failures[:25],
                 "failure_count": len(failures),
-                "elapsed_seconds": round(time.time() - started, 2),
+                "error": task.get("error"),
+                "elapsed_seconds": elapsed,
             }
         )
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
 
 
 @app.route("/api/export/<task_id>", methods=["POST"])
 def api_export(task_id):
     cleanup_tasks()
-    task = scan_tasks.get(task_id)
-    if not task:
-        return jsonify({"error": "Scan result expired or was not found."}), 404
+    with scan_tasks_lock:
+        task = scan_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "Scan result expired or was not found."}), 404
+        default_rows = task.get("results", [])
+        task["updated_at"] = time.time()
 
     payload = request.get_json(silent=True) or {}
-    rows = payload.get("rows") or task.get("results", [])
+    rows = payload.get("rows") or default_rows
 
     si = io.StringIO()
     writer = csv.writer(si)

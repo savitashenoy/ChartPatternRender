@@ -256,6 +256,23 @@ function collectConfig() {
     };
 }
 
+async function parseJsonResponse(res) {
+    const contentType = res.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+        const text = await res.text();
+        const snippet = text.replace(/\s+/g, " ").trim().slice(0, 140);
+        throw new Error(
+            `Server returned an unexpected response (HTTP ${res.status}). ` +
+            (snippet ? `Details: ${snippet}` : "It may have timed out or restarted mid-request.")
+        );
+    }
+    const data = await res.json();
+    if (!res.ok && !data.error) {
+        throw new Error(`Request failed (HTTP ${res.status}).`);
+    }
+    return data;
+}
+
 function escapeHtml(value) {
     return String(value ?? "")
         .replaceAll("&", "&amp;")
@@ -446,7 +463,7 @@ async function loadSheets() {
     showStatus("Loading ScannerData.xlsx sheets...");
     try {
         const res = await fetch("/api/sheets");
-        const data = await res.json();
+        const data = await parseJsonResponse(res);
         if (data.error) throw new Error(data.error);
 
         sheetSelect.innerHTML = data.sheets.map((sheet) => {
@@ -458,8 +475,18 @@ async function loadSheets() {
     }
 }
 
+let pollTimer = null;
+
+function stopPolling() {
+    if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+    }
+}
+
 scanForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    stopPolling();
     tableData = [];
     filteredData = [];
     currentTaskId = null;
@@ -480,13 +507,38 @@ scanForm.addEventListener("submit", async (event) => {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sheet, config: collectConfig() })
         });
-        const data = await res.json();
+        const data = await parseJsonResponse(res);
         if (data.error) throw new Error(data.error);
 
         currentTaskId = data.task_id;
+        document.getElementById("metricScanned").textContent = `0 / ${data.total}`;
+        pollScanStatus(data.task_id);
+    } catch (err) {
+        showStatus(err.message, "error");
+        startBtn.disabled = false;
+    }
+});
+
+async function pollScanStatus(taskId) {
+    try {
+        const res = await fetch(`/api/scan/status/${taskId}`);
+        const data = await parseJsonResponse(res);
+        if (data.error) throw new Error(data.error);
+
         tableData = data.results || [];
-        document.getElementById("metricScanned").textContent = data.total;
+        document.getElementById("metricScanned").textContent = `${data.scanned} / ${data.total}`;
         document.getElementById("metricElapsed").textContent = `${data.elapsed_seconds}s`;
+        renderTable();
+
+        if (data.status === "running") {
+            showStatus(`Scanning... ${data.scanned}/${data.total} tickers checked`);
+            pollTimer = setTimeout(() => pollScanStatus(taskId), 1500);
+            return;
+        }
+
+        if (data.status === "error") {
+            throw new Error(data.error || "Scan failed unexpectedly.");
+        }
 
         if (data.failure_count) {
             const names = (data.failures || []).map((item) => escapeHtml(item.ticker)).join(", ");
@@ -495,13 +547,12 @@ scanForm.addEventListener("submit", async (event) => {
         }
 
         hideStatus();
-        renderTable();
+        startBtn.disabled = false;
     } catch (err) {
         showStatus(err.message, "error");
-    } finally {
         startBtn.disabled = false;
     }
-});
+}
 
 document.querySelectorAll("th[data-sort]").forEach((th) => {
     th.addEventListener("click", () => {
@@ -550,7 +601,7 @@ exportBtn.addEventListener("click", async () => {
             body: JSON.stringify({ rows })
         });
         if (!res.ok) {
-            const data = await res.json();
+            const data = await parseJsonResponse(res);
             throw new Error(data.error || "Export failed.");
         }
         const blob = await res.blob();
